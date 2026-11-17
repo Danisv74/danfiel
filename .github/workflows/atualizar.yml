@@ -31,12 +31,21 @@ jobs:
         run: |
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
-          
-          git add site/index.html
-          if git diff --cached --quiet; then
-            echo "Sem mudanças para salvar."
-          else
+          for tentativa in 1 2 3; do
+            git add site/index.html
+            if git diff --cached --quiet; then
+              echo "Sem mudanças para salvar."
+              exit 0
+            fi
             git commit -m "Atualiza notícias"
-            git pull --rebase
-            git push
-          fi
+            if git push; then
+              echo "Enviado na tentativa $tentativa."
+              exit 0
+            fi
+            echo "Envio recusado (tentativa $tentativa). Refazendo em cima da versão mais nova."
+            git fetch origin main
+            git reset --hard origin/main
+            python agregador_corinthians.py
+          done
+          echo "Não consegui enviar depois de 3 tentativas."
+          exit 1
