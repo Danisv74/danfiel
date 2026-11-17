@@ -29,8 +29,9 @@ jobs:
         run: python agregador_corinthians.py
       - name: Salvar se houve mudança
         run: |
-          git config user.name "danfiel-bot"
-          git config user.email "danfiel-bot@users.noreply.github.com"
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+          
           git add site/index.html
           if git diff --cached --quiet; then
             echo "Sem mudanças para salvar."
