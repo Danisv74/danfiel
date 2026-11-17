@@ -1,6 +1,0 @@
-Exemplo: como escrever um post no DanFiel
-Este é um post de exemplo. A primeira linha do arquivo vira o título, e tudo o que vem depois vira o texto da opinião.
-
-Para separar parágrafos, deixe uma linha em branco entre eles, como fiz aqui.
-
-Para publicar uma opinião sua, crie um arquivo novo nesta pasta com o nome no formato AAAA-MM-DD-titulo.txt (por exemplo, 2026-11-20-analise-do-jogo.txt). A data no começo do nome é a data que aparece no site. Pode apagar este exemplo.
