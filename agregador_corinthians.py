@@ -25,14 +25,27 @@ from datetime import datetime, timedelta, timezone
 
 GN = "https://news.google.com/rss/search?q={}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
 
-# Feeds da aba INÍCIO (notícias gerais).
+# Fontes DIRETAS (feeds dos próprios sites): o clique abre direto na matéria.
+#   nome        = nome exibido no card
+#   intro       = mostrar a introdução que vem no feed? (False = só título + link)
+#   categorias  = usar as etiquetas do feed para escolher a aba?
+# ATENÇÃO: o campo "description" do ge traz a matéria inteira, por isso intro=False.
+FONTES_DIRETAS = [
+    {"nome": "Central do Timão", "url": "https://centraldotimao.com.br/feed",
+     "intro": True, "categorias": False},
+    {"nome": "Meu Timão", "url": "https://www.meutimao.com.br/rss",
+     "intro": False, "categorias": True},
+    {"nome": "ge", "url": "https://pox.globo.com/rss/ge/futebol/times/corinthians/",
+     "intro": False, "categorias": False},
+]
+
+# Feeds do Google News da aba INÍCIO (complemento; o clique passa pelo Google).
 FEEDS_GERAIS = [
     GN.format("Corinthians"),
     GN.format("Corinthians+Timão+when:2d"),
-    "https://centraldotimao.com.br/feed",
 ]
 
-# Abas: nome -> feeds (tudo que vem de uma busca entra na aba dela).
+# Abas: nome -> buscas do Google News (tudo que vem de uma busca entra na aba dela).
 # A ordem aqui é a ordem das abas no menu.
 ABAS = {
     "Futebol": [GN.format("Corinthians+Brasileirão+jogo")],
@@ -43,10 +56,22 @@ ABAS = {
 # Ordem de preenchimento: abas específicas primeiro, a genérica (Futebol) por último.
 ORDEM_PREENCHIMENTO = ["Feminino", "Base", "Mercado", "Futebol"]
 
+# Etiquetas (categorias) dos feeds diretos -> aba. Só vale para fontes com categorias=True.
+# Procura estes trechos (em minúsculas) nas etiquetas da notícia.
+CATEGORIAS_POR_ABA = {
+    "Feminino": ["feminin"],
+    "Base": ["sub-20", "sub-17", "sub-15", "base do corinthians"],
+    "Mercado": ["mercado da bola", "contratações do corinthians"],
+    "Futebol": ["campeonato brasileiro", "copa do brasil", "copa sul-americana",
+                "libertadores da américa", "escalação do corinthians",
+                "próximos jogos do corinthians", "resultados do corinthians",
+                "treino do corinthians"],
+}
+
 MAX_DIAS_ABA = 30       # abas ignoram notícias mais velhas que isso
-NOMES_FONTES = {"centraldotimao.com.br": "Central do Timão"}  # nome exibido de feeds diretos
-N_DESTAQUES = 4        # 1 principal + 3 na coluna Destaques
-N_ULTIMAS = 12         # cards "últimas notícias" no Início
+DIAS_FEED_PARADO = 3    # avisa no log se uma fonte direta ficar tantos dias sem notícia
+N_DESTAQUES = 4         # 1 principal + 3 na coluna Destaques
+N_ULTIMAS = 12          # cards "últimas notícias" no Início
 MAX_POR_ABA = 20
 BR = timezone(timedelta(hours=-3))  # horário de Brasília (o Brasil não tem horário de verão)
 RAIZ = os.path.dirname(os.path.abspath(__file__))
@@ -74,16 +99,36 @@ def introducao(it, titulo, limite=160):
     return texto
 
 
-def ler_feed(url):
-    itens = []
-    google = "news.google.com" in url
+def limpar_titulo(t):
+    return re.sub(r"\s+", " ", html.unescape(t or "")).strip()
+
+
+def chave_titulo(t):
+    """Chave para detectar a mesma notícia repetida (ignora pontuação e maiúsculas)."""
+    return re.sub(r"\W+", " ", t.lower()).strip()[:70]
+
+
+def aba_pelas_categorias(etiquetas):
+    """Escolhe a aba pela primeira regra que combinar, na ordem de preenchimento."""
+    for aba in ORDEM_PREENCHIMENTO:
+        if any(p in etiquetas for p in CATEGORIAS_POR_ABA.get(aba, [])):
+            return aba
+    return None
+
+
+def ler_feed(url, nome=None, usar_intro=True, usar_categorias=False):
+    """Lê um feed. Devolve a lista de notícias, ou None se o feed falhou.
+    nome=None  -> feed do Google News (o nome da fonte vem dentro de cada item).
+    nome="X"   -> feed direto do site X."""
+    google = nome is None
     try:
         root = ET.fromstring(baixar(url))
     except Exception as e:
         print(f"Falha em {url}: {e}")
-        return itens
+        return None
+    itens = []
     for it in root.iter("item"):
-        titulo = (it.findtext("title") or "").strip()
+        titulo = limpar_titulo(it.findtext("title"))
         link = (it.findtext("link") or "").strip()
         if google:
             fonte = (it.findtext("source") or "").strip(" -–—")
@@ -92,9 +137,8 @@ def ler_feed(url):
                 fonte = fonte.strip(" -–—")
             elif " - " in titulo and fonte:
                 titulo = titulo.rsplit(" - ", 1)[0]
-        else:  # feed direto: usa o nome do site
-            host = urllib.parse.urlparse(url).netloc.replace("www.", "")
-            fonte = NOMES_FONTES.get(host, host)
+        else:
+            fonte = nome
         try:
             data = parsedate_to_datetime(it.findtext("pubDate"))
             if data.tzinfo is None:
@@ -102,16 +146,58 @@ def ler_feed(url):
         except Exception:
             data = datetime.now(timezone.utc)
         if titulo and link:
-            itens.append({"titulo": titulo, "link": link, "fonte": fonte or "Fonte",
-                          "data": data, "intro": introducao(it, titulo)})
+            n = {"titulo": titulo, "link": link, "fonte": fonte or "Fonte", "data": data,
+                 "intro": introducao(it, titulo) if usar_intro else ""}
+            if usar_categorias:
+                etiquetas = ",".join(c.text or "" for c in it.findall("category")).lower()
+                n["aba"] = aba_pelas_categorias(etiquetas)
+            itens.append(n)
     return itens
 
 
-def ler_varios(urls):
+# ---------- Painel de saúde das fontes (aparece no log do GitHub) ----------
+SAUDE = []
+
+
+def registrar_saude(rotulo, itens, direta):
+    SAUDE.append({"rotulo": rotulo, "direta": direta,
+                  "itens": None if itens is None else len(itens),
+                  "ultima": max((n["data"] for n in itens), default=None) if itens else None})
+
+
+def relatorio_saude():
+    print("\nSaúde das fontes:")
+    agora = datetime.now(timezone.utc)
+    for s in SAUDE:
+        r = s["rotulo"]
+        if s["itens"] is None:
+            print(f"  [FALHOU] {r}")
+            if s["direta"]:
+                print(f"::warning::A fonte '{r}' falhou nesta execução.")
+        elif not s["itens"]:
+            print(f"  [vazio ] {r}: 0 notícias")
+            if s["direta"]:
+                print(f"::warning::A fonte '{r}' veio vazia.")
+        else:
+            horas = (agora - s["ultima"]).total_seconds() / 3600
+            quando = f"há {int(horas)}h" if horas < 48 else f"há {int(horas // 24)}d"
+            print(f"  [ok    ] {r}: {s['itens']} notícias, última em "
+                  f"{s['ultima'].astimezone(BR):%d/%m %H:%M} ({quando})")
+            if s["direta"] and horas > DIAS_FEED_PARADO * 24:
+                print(f"::warning::A fonte '{r}' está sem notícia nova há {int(horas // 24)} dias.")
+
+
+def rotulo_google(url):
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("q", [url])[0]
+    return "Google News: " + q
+
+
+def ler_google(urls):
     todos = []
     for u in urls:
-        todos += ler_feed(u)
-    todos.sort(key=lambda n: n["data"], reverse=True)
+        itens = ler_feed(u)
+        registrar_saude(rotulo_google(u), itens, direta=False)
+        todos += itens or []
     return todos
 
 
@@ -120,24 +206,42 @@ def coletar():
     vistos = set()
 
     def novo(n):
-        chave = n["titulo"].lower()[:70]
+        chave = chave_titulo(n["titulo"])
         if chave in vistos:
             return False
         vistos.add(chave)
         return True
 
+    def mais_recentes(lista):
+        return sorted(lista, key=lambda n: n["data"], reverse=True)
+
+    diretas = []
+    for f in FONTES_DIRETAS:
+        itens = ler_feed(f["url"], nome=f["nome"], usar_intro=f.get("intro", True),
+                         usar_categorias=f.get("categorias", False))
+        registrar_saude(f["nome"], itens, direta=True)
+        diretas += itens or []
+    por_chave = {chave_titulo(n["titulo"]): n for n in diretas}
+
+    def preferir_direta(lista):
+        """Se a mesma notícia veio do Google e de um feed direto, fica a versão direta."""
+        return [por_chave.get(chave_titulo(n["titulo"]), n) for n in lista]
+
     inicio = []
-    for n in ler_varios(FEEDS_GERAIS):
+    for n in mais_recentes(diretas + preferir_direta(ler_google(FEEDS_GERAIS))):
         if novo(n):
             inicio.append(n)
         if len(inicio) >= N_DESTAQUES + N_ULTIMAS:
             break
 
+    agora = datetime.now(timezone.utc)
     por_aba = {}
     for nome in ORDEM_PREENCHIMENTO:
+        candidatas = [n for n in diretas if n.get("aba") == nome]
+        candidatas += preferir_direta(ler_google(ABAS[nome]))
         lista = []
-        for n in ler_varios(ABAS[nome]):
-            if (datetime.now(timezone.utc) - n["data"]).days > MAX_DIAS_ABA:
+        for n in mais_recentes(candidatas):
+            if (agora - n["data"]).days > MAX_DIAS_ABA:
                 continue
             if novo(n):
                 lista.append(n)
@@ -380,6 +484,7 @@ def normalizar(h):
 
 if __name__ == "__main__":
     inicio, por_aba = coletar()
+    relatorio_saude()
     total = len(inicio) + sum(len(v) for v in por_aba.values())
     print(f"{total} notícias coletadas")
     print(f"  Início: {len(inicio)} | " + " | ".join(f"{k}: {len(v)}" for k, v in por_aba.items()))
