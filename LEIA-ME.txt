@@ -1,0 +1,18 @@
+DANFIEL - COMO FUNCIONA
+
+agregador_corinthians.py   script que busca as notícias e gera o site
+posts/                     suas opiniões (um arquivo .txt por post)
+site/                      pasta publicada no Vercel (index.html é gerado sozinho)
+.github/workflows/         agendamento: roda o script a cada 30 min no GitHub
+
+PUBLICAR UMA OPINIÃO
+1. No GitHub, abra a pasta posts > Add file > Create new file.
+2. Nome do arquivo: AAAA-MM-DD-titulo.txt  (ex.: 2026-11-20-analise-do-jogo.txt)
+3. Primeira linha = título. Resto = texto. Linha em branco separa parágrafos.
+4. Commit changes. Em 1 a 2 minutos o site é atualizado.
+
+APAGAR UMA OPINIÃO
+Abra o arquivo em posts, clique na lixeira e confirme (Commit changes).
+
+NUNCA coloque senhas ou chaves de API dentro dos arquivos. Chaves vão em
+Settings > Secrets and variables > Actions.
