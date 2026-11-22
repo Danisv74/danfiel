@@ -13,6 +13,7 @@ Uso local:  python agregador_corinthians.py
 No GitHub, o arquivo .github/workflows/atualizar.yml roda este script sozinho.
 """
 import html
+import html.entities
 import os
 import re
 import subprocess
@@ -91,17 +92,20 @@ DESCRICAO = ("Notícias do Corinthians em um só lugar: títulos, fontes e links
              "matéria original, mais a opinião do Dan.")
 
 
-def baixar(url):
+AGENTE_PADRAO = "Mozilla/5.0 (danfiel)"                    # buscas do Google News
+AGENTE_ROBO = f"DanFielBot/1.0 (+{SITE_URL}/fontes.html)"  # feeds diretos: o robô se identifica
+
+
+def baixar(url, agente=None):
     url = urllib.parse.quote(url, safe=":/?&=+%@,;~-_.()")  # converte acentos (ã -> %C3%A3)
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (danfiel)"})
+    req = urllib.request.Request(url, headers={"User-Agent": agente or AGENTE_PADRAO})
     with urllib.request.urlopen(req, timeout=15) as r:
         return r.read()
 
 
-def introducao(it, titulo, limite=160):
+def introducao(bruto, titulo, limite=160):
     """Resumo do feed sem HTML, cortado em ~160 caracteres."""
-    bruto = it.findtext("description") or ""
-    texto = html.unescape(re.sub(r"<[^>]+>", " ", bruto))
+    texto = html.unescape(re.sub(r"<[^>]+>", " ", bruto or ""))
     texto = re.sub(r"\s+", " ", texto).strip()
     if len(texto) < 40 or texto.lower().startswith(titulo.lower()[:30]):
         return ""  # Google News só repete título + fonte
@@ -127,22 +131,92 @@ def aba_pelas_categorias(etiquetas):
     return None
 
 
+def limpar_xml(dados):
+    """Conserta defeitos comuns de feeds: caracteres inválidos, entidades HTML (&nbsp;...) e & soltos."""
+    m = re.match(rb"\s*<\?xml[^>]*encoding=[\"']([A-Za-z0-9_\-]+)[\"']", dados)
+    try:
+        t = dados.decode(m.group(1).decode() if m else "utf-8", errors="replace")
+    except LookupError:
+        t = dados.decode("utf-8", errors="replace")
+    t = re.sub(r"^\s*<\?xml[^>]*\?>", '<?xml version="1.0" encoding="UTF-8"?>', t)
+    t = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", t)
+
+    def entidade(m):
+        nome = m.group(1)
+        if nome in ("amp", "lt", "gt", "quot", "apos"):
+            return m.group(0)
+        cp = html.entities.name2codepoint.get(nome)
+        return f"&#{cp};" if cp else f"&amp;{nome};"
+    t = re.sub(r"&([A-Za-z][A-Za-z0-9]*);", entidade, t)
+    t = re.sub(r"&(?!(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#x[0-9A-Fa-f]+);)", "&amp;", t)
+    return t.encode("utf-8")
+
+
+def itens_do_xml(root):
+    return [{"title": it.findtext("title") or "", "link": it.findtext("link") or "",
+             "pubDate": it.findtext("pubDate") or "", "source": it.findtext("source") or "",
+             "description": it.findtext("description") or "",
+             "categorias": [c.text or "" for c in it.findall("category")]}
+            for it in root.iter("item")]
+
+
+def itens_por_regex(texto):
+    """Último recurso: pega os campos de cada <item> por busca de texto, sem exigir XML perfeito."""
+    itens = []
+    for parte in re.split(r"(?=<item[\s>])", texto, flags=re.I):
+        if not re.match(r"<item[\s>]", parte, re.I):
+            continue
+        bloco = re.split(r"</item>", parte, maxsplit=1, flags=re.I)[0]  # um item sem fechamento não engole o próximo
+
+        def valor(v):
+            v = v.strip()
+            cd = re.fullmatch(r"<!\[CDATA\[(.*?)\]\]>", v, re.S)
+            return cd.group(1).strip() if cd else html.unescape(v)
+
+        def campo(nome):
+            m = re.search(rf"<{nome}\b[^>]*>(.*?)</{nome}>", bloco, re.S | re.I)
+            return valor(m.group(1)) if m else ""
+        cats = [valor(c) for c in re.findall(r"<category\b[^>]*>(.*?)</category>", bloco, re.S | re.I)]
+        itens.append({"title": campo("title"), "link": campo("link"), "pubDate": campo("pubDate"),
+                      "source": campo("source"), "description": campo("description"), "categorias": cats})
+    return itens
+
+
+def ler_xml_tolerante(dados):
+    """Devolve (itens, aviso). Tenta o XML como veio; depois limpo; por fim item a item."""
+    try:
+        return itens_do_xml(ET.fromstring(dados)), None
+    except ET.ParseError as e:
+        erro = str(e)
+    limpo = limpar_xml(dados)
+    try:
+        return itens_do_xml(ET.fromstring(limpo)), f"XML com erro ({erro}); corrigido automaticamente"
+    except ET.ParseError:
+        pass
+    itens = itens_por_regex(limpo.decode("utf-8", errors="replace"))
+    if itens:
+        return itens, f"XML com erro ({erro}); lido item a item"
+    raise ET.ParseError(erro)
+
+
 def ler_feed(url, nome=None, usar_intro=True, usar_categorias=False):
     """Lê um feed. Devolve a lista de notícias, ou None se o feed falhou.
     nome=None  -> feed do Google News (o nome da fonte vem dentro de cada item).
-    nome="X"   -> feed direto do site X."""
+    nome="X"   -> feed direto do site X (o robô se identifica como DanFielBot)."""
     google = nome is None
     try:
-        root = ET.fromstring(baixar(url))
+        brutos, aviso = ler_xml_tolerante(baixar(url, None if google else AGENTE_ROBO))
     except Exception as e:
         print(f"Falha em {url}: {e}")
         return None
+    if aviso:
+        print(f"Aviso em {url}: {aviso}.")
     itens = []
-    for it in root.iter("item"):
-        titulo = limpar_titulo(it.findtext("title"))
-        link = (it.findtext("link") or "").strip()
+    for b in brutos:
+        titulo = limpar_titulo(b["title"])
+        link = b["link"].strip()
         if google:
-            fonte = (it.findtext("source") or "").strip(" -–—")
+            fonte = b["source"].strip(" -–—")
             if not fonte and " - " in titulo:
                 titulo, fonte = titulo.rsplit(" - ", 1)
                 fonte = fonte.strip(" -–—")
@@ -151,17 +225,16 @@ def ler_feed(url, nome=None, usar_intro=True, usar_categorias=False):
         else:
             fonte = nome
         try:
-            data = parsedate_to_datetime(it.findtext("pubDate"))
+            data = parsedate_to_datetime(b["pubDate"])
             if data.tzinfo is None:
                 data = data.replace(tzinfo=timezone.utc)
         except Exception:
             data = datetime.now(timezone.utc)
         if titulo and link:
             n = {"titulo": titulo, "link": link, "fonte": fonte or "Fonte", "data": data,
-                 "intro": introducao(it, titulo) if usar_intro else ""}
+                 "intro": introducao(b["description"], titulo) if usar_intro else ""}
             if usar_categorias:
-                etiquetas = ",".join(c.text or "" for c in it.findall("category")).lower()
-                n["aba"] = aba_pelas_categorias(etiquetas)
+                n["aba"] = aba_pelas_categorias(",".join(b["categorias"]).lower())
             itens.append(n)
     return itens
 
@@ -443,6 +516,8 @@ def pagina_fontes():
         f"<ul>{fontes}</ul>"
         "<p>Também usamos buscas no Google News. Nesses cards, o nome do veículo aparece em cada "
         "notícia, e o link passa antes pelo Google.</p>"
+        "<p>Para ler os feeds das fontes acima, o site usa um robô chamado DanFielBot, que se "
+        "identifica com o endereço desta página.</p>"
         "<h2>Opinião do Dan</h2>"
         "<p>Os textos dessa seção são autorais e expressam a opinião do autor, não a do clube nem a "
         "dos veículos citados.</p>"
